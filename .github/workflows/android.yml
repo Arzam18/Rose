@@ -12,15 +12,16 @@ jobs:
     runs-on: ubuntu-24.04
 
     steps:
-      # ------------------------------------------------------------
+
+      # ============================================================
       # CHECKOUT
-      # ------------------------------------------------------------
+      # ============================================================
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ------------------------------------------------------------
+      # ============================================================
       # HOST TOOLS
-      # ------------------------------------------------------------
+      # ============================================================
       - name: Install host tools
         shell: bash
         run: |
@@ -35,9 +36,9 @@ jobs:
             file \
             binutils
 
-      # ------------------------------------------------------------
+      # ============================================================
       # ANDROID SDK
-      # ------------------------------------------------------------
+      # ============================================================
       - name: Configure Android SDK
         shell: bash
         run: |
@@ -59,9 +60,9 @@ jobs:
 
           test -d "$SDK_ROOT"
 
-      # ------------------------------------------------------------
-      # FIND SDKMANAGER
-      # ------------------------------------------------------------
+      # ============================================================
+      # LOCATE SDKMANAGER
+      # ============================================================
       - name: Locate sdkmanager
         shell: bash
         run: |
@@ -89,10 +90,6 @@ jobs:
 
           if [ -z "$SDKMANAGER" ]; then
             echo "ERROR: sdkmanager was not found."
-            find "$SDK_ROOT/cmdline-tools" \
-              -maxdepth 4 \
-              -type f \
-              2>/dev/null || true
             exit 1
           fi
 
@@ -100,9 +97,9 @@ jobs:
 
           "$SDKMANAGER" --version
 
-      # ------------------------------------------------------------
+      # ============================================================
       # ACCEPT LICENSES
-      # ------------------------------------------------------------
+      # ============================================================
       - name: Accept Android licenses
         shell: bash
         run: |
@@ -112,9 +109,9 @@ jobs:
             --sdk_root="$ANDROID_SDK_ROOT" \
             --licenses || true
 
-      # ------------------------------------------------------------
+      # ============================================================
       # INSTALL NDK
-      # ------------------------------------------------------------
+      # ============================================================
       - name: Install Android NDK
         shell: bash
         run: |
@@ -126,9 +123,9 @@ jobs:
             "platforms;android-24" \
             "ndk;27.2.12479018"
 
-      # ------------------------------------------------------------
+      # ============================================================
       # VERIFY NDK
-      # ------------------------------------------------------------
+      # ============================================================
       - name: Verify Android NDK
         shell: bash
         run: |
@@ -143,14 +140,9 @@ jobs:
 
           "$TOOLCHAIN/aarch64-linux-android24-clang++" --version
 
-      # ------------------------------------------------------------
-      # DOWNLOAD ROSE NNUE NETWORK
-      #
-      # IMPORTANT:
-      # Rose's Makefile normally downloads the network itself.
-      # We download it here first so the Makefile sees the file
-      # already present and does not get stuck at 0%.
-      # ------------------------------------------------------------
+      # ============================================================
+      # DOWNLOAD ROSE NETWORK
+      # ============================================================
       - name: Download Rose neural network
         shell: bash
         run: |
@@ -167,8 +159,6 @@ jobs:
 
           echo "Downloading:"
           echo "$URL"
-          echo "To:"
-          echo "$OUTPUT"
 
           rm -f "$OUTPUT"
 
@@ -189,20 +179,110 @@ jobs:
           test -s "$OUTPUT"
 
           echo
-          echo "Downloaded network:"
+          echo "Network downloaded successfully:"
           ls -lh "$OUTPUT"
 
           echo
           echo "Network size:"
           wc -c "$OUTPUT"
 
-          echo
-          echo "Network file:"
-          file "$OUTPUT"
+      # ============================================================
+      # REPLACE C++26 #EMBED
+      #
+      # Android NDK 27.2 does not implement #embed.
+      #
+      # We convert the exact .rosenet bytes into a C++ unsigned-char
+      # array and change embedded.hpp to match.
+      #
+      # The neural network therefore remains INSIDE the executable.
+      # ============================================================
+      - name: Generate Android embedded network source
+        shell: bash
+        run: |
+          set -euxo pipefail
 
-      # ------------------------------------------------------------
-      # BUILD ROSE
-      # ------------------------------------------------------------
+          NETWORK="$(tr -d '[:space:]' < src/rose_network.txt)"
+          NETWORK_FILE="networks/${NETWORK}.rosenet"
+
+          test -s "$NETWORK_FILE"
+
+          python3 <<'PY'
+          from pathlib import Path
+
+          network_name = Path("src/rose_network.txt").read_text().strip()
+          network_file = Path("networks") / f"{network_name}.rosenet"
+
+          embedded_cpp = Path("src/rose/eval/nnue/embedded.cpp")
+          embedded_hpp = Path("src/rose/eval/nnue/embedded.hpp")
+
+          data = network_file.read_bytes()
+
+          print(f"Embedding {len(data):,} bytes")
+          print(f"Network: {network_file}")
+
+          # --------------------------------------------------------
+          # Change the declaration from char[] to unsigned char[].
+          # This allows every byte 0x00..0xFF to be represented
+          # without narrowing-conversion problems.
+          # --------------------------------------------------------
+          hpp = embedded_hpp.read_text()
+
+          old_decl = (
+              "alignas(EmbeddedNetwork) extern const char "
+              "g_embedded_network_raw[];"
+          )
+
+          new_decl = (
+              "alignas(EmbeddedNetwork) extern const unsigned char "
+              "g_embedded_network_raw[];"
+          )
+
+          if old_decl not in hpp:
+              raise SystemExit(
+                  "Could not find the original g_embedded_network_raw declaration"
+              )
+
+          hpp = hpp.replace(old_decl, new_decl)
+
+          embedded_hpp.write_text(hpp)
+
+          # --------------------------------------------------------
+          # Generate the C++ byte array.
+          # --------------------------------------------------------
+          with embedded_cpp.open("w", newline="\n") as f:
+              f.write('#include "rose/eval/nnue/embedded.hpp"\n\n')
+              f.write("namespace rose::eval::nnue {\n\n")
+              f.write(
+                  "  alignas(EmbeddedNetwork) "
+                  "const unsigned char g_embedded_network_raw[] = {\n"
+              )
+
+              for i in range(0, len(data), 16):
+                  chunk = data[i:i + 16]
+                  values = ", ".join(f"0x{b:02X}" for b in chunk)
+                  f.write(f"    {values},\n")
+
+              f.write("  };\n\n")
+              f.write("}  // namespace rose::eval::nnue\n")
+
+          print(f"Generated: {embedded_cpp}")
+          print(f"Generated: {embedded_hpp}")
+
+          print("Embedded source size:")
+          print(f"{embedded_cpp.stat().st_size:,} bytes")
+          PY
+
+          echo
+          echo "Generated embedded.cpp:"
+          ls -lh src/rose/eval/nnue/embedded.cpp
+
+          echo
+          echo "First lines:"
+          sed -n '1,12p' src/rose/eval/nnue/embedded.cpp
+
+      # ============================================================
+      # BUILD
+      # ============================================================
       - name: Build Rose for Android ARM64 NEON
         shell: bash
         run: |
@@ -216,7 +296,6 @@ jobs:
           export CXX="$TOOLCHAIN/aarch64-linux-android24-clang++"
 
           VERSION="$(tr -d '[:space:]' < src/rose_version.txt)"
-
           BIN="rose-${VERSION}-android-arm64-neon"
 
           echo "========================================"
@@ -243,9 +322,9 @@ jobs:
           echo "Build completed:"
           ls -lh "$BIN"
 
-      # ------------------------------------------------------------
+      # ============================================================
       # VERIFY ARM64
-      # ------------------------------------------------------------
+      # ============================================================
       - name: Verify ARM64 binary
         shell: bash
         run: |
@@ -262,6 +341,7 @@ jobs:
 
           echo
           echo "ELF header:"
+
           readelf -h "$BIN" |
             grep -E \
               'Class:|Data:|Type:|Machine:|Entry point'
@@ -272,9 +352,9 @@ jobs:
           file "$BIN" |
             grep -E 'ARM aarch64|ARM64|AArch64'
 
-      # ------------------------------------------------------------
-      # CHECK DYNAMIC DEPENDENCIES
-      # ------------------------------------------------------------
+      # ============================================================
+      # CHECK LIBC++
+      # ============================================================
       - name: Check runtime dependencies
         shell: bash
         run: |
@@ -283,30 +363,26 @@ jobs:
           VERSION="$(tr -d '[:space:]' < src/rose_version.txt)"
           BIN="rose-${VERSION}-android-arm64-neon"
 
-          echo "========================================"
-          echo "Dynamic dependencies"
-          echo "========================================"
-
+          echo "Dynamic dependencies:"
           readelf -d "$BIN" |
             grep NEEDED || true
 
           echo
-          echo "Checking for libc++_shared.so..."
+          echo "Checking libc++_shared.so..."
 
           if readelf -d "$BIN" |
             grep -q 'libc++_shared.so'; then
 
-            echo "ERROR:"
-            echo "Binary still requires libc++_shared.so"
+            echo "ERROR: binary still requires libc++_shared.so"
             exit 1
           fi
 
-          echo "OK: libc++_shared.so is not required."
+          echo "OK: no libc++_shared.so dependency."
 
-      # ------------------------------------------------------------
-      # CHECK ROSE NETWORK WAS EMBEDDED
-      # ------------------------------------------------------------
-      - name: Verify embedded network object
+      # ============================================================
+      # VERIFY NETWORK IS INSIDE BINARY
+      # ============================================================
+      - name: Verify embedded network
         shell: bash
         run: |
           set -euxo pipefail
@@ -317,29 +393,25 @@ jobs:
           NETWORK="$(tr -d '[:space:]' < src/rose_network.txt)"
           NETWORK_FILE="networks/${NETWORK}.rosenet"
 
-          echo "Network used:"
-          echo "$NETWORK"
+          NETWORK_SIZE="$(wc -c < "$NETWORK_FILE")"
+          BINARY_SIZE="$(wc -c < "$BIN")"
+
+          echo "Network size: $NETWORK_SIZE bytes"
+          echo "Binary size:  $BINARY_SIZE bytes"
+
+          if [ "$BINARY_SIZE" -le "$NETWORK_SIZE" ]; then
+            echo "WARNING: binary is not larger than the network."
+            echo "This may indicate the network was not embedded."
+          else
+            echo "OK: binary contains substantial embedded network data."
+          fi
 
           echo
-          echo "Network file:"
-          ls -lh "$NETWORK_FILE"
+          echo "Embedded network source compiled successfully."
 
-          echo
-          echo "Binary size:"
-          ls -lh "$BIN"
-
-          echo
-          echo "Embedded network object:"
-          strings "$BIN" |
-            grep -F "$NETWORK" ||
-            true
-
-          echo
-          echo "Network was supplied to embedded.cpp during compilation."
-
-      # ------------------------------------------------------------
-      # PREPARE SINGLE-BINARY ARTIFACT
-      # ------------------------------------------------------------
+      # ============================================================
+      # PREPARE ONE FILE ONLY
+      # ============================================================
       - name: Prepare single binary artifact
         shell: bash
         run: |
@@ -352,15 +424,14 @@ jobs:
           mkdir -p artifact
 
           cp "$BIN" "artifact/$BIN"
-
           chmod +x "artifact/$BIN"
 
-          echo "Artifact contents:"
+          echo "Final artifact:"
           ls -lah artifact
 
-      # ------------------------------------------------------------
-      # UPLOAD ONLY THE ENGINE BINARY
-      # ------------------------------------------------------------
+      # ============================================================
+      # UPLOAD
+      # ============================================================
       - name: Upload Android ARM64 NEON binary
         uses: actions/upload-artifact@v4
         with:

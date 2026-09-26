@@ -75,7 +75,7 @@ namespace rose {
   template<eval::concepts::State Evaluation>
   auto Search<Evaluation>::launch() -> void {
     rose_assert(!m_thread.joinable());
-    m_thread = std::jthread([this] {
+    m_thread = std::thread([this] {
       this->thread_main();
     });
   }

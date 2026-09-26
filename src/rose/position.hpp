@@ -35,8 +35,18 @@ namespace rose {
         return PieceMask {to_vector().eq(u8x16::splat(ptype.raw...)).to_bits()};
       } else {
         constexpr u8 test_bits = (0 | ... | (1 << ptype.to_index()));
-        constexpr u8x16 ptype_to_bits {{0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0, 0, 0, 0, 0, 0, 0, 0}};
-        return PieceMask {(to_vector().swizzle(ptype_to_bits) & u8x16::splat(test_bits)).nonzeros().to_bits()};
+        constexpr u8x16 ptype_to_bits {{
+          0x01, 0x02, 0x04, 0x08,
+          0x10, 0x20, 0x40, 0x80,
+          0, 0, 0, 0, 0, 0, 0, 0
+        }};
+
+        return PieceMask {
+          (to_vector().swizzle(ptype_to_bits) &
+           u8x16::splat(test_bits))
+              .nonzeros()
+              .to_bits()
+        };
       }
     }
 
@@ -53,74 +63,170 @@ namespace rose {
     }
   };
 
+
   struct RookInfo {
     u32 raw = 0x80808080;
 
     constexpr auto half(Color color) const -> u16 {
-      return static_cast<u16>(raw >> (color.to_index() * 16));
+      return static_cast<u16>(
+        raw >> (color.to_index() * 16)
+      );
     }
 
     constexpr auto aside(Color color) const -> Square {
-      return Square {static_cast<u8>(half(color))};
+      return Square {
+        static_cast<u8>(half(color))
+      };
     }
 
     constexpr auto hside(Color color) const -> Square {
-      return Square {static_cast<u8>(half(color) >> 8)};
+      return Square {
+        static_cast<u8>(half(color) >> 8)
+      };
     }
 
-    constexpr auto set_aside(Color color, Square sq) -> void {
-      raw &= ~(static_cast<u32>(0x00FF) << (color.to_index() * 16));
-      raw |= static_cast<u32>(sq.raw) << (color.to_index() * 16);
+    constexpr auto set_aside(
+        Color color,
+        Square sq) -> void {
+
+      raw &= ~(
+        static_cast<u32>(0x00FF) <<
+        (color.to_index() * 16)
+      );
+
+      raw |=
+        static_cast<u32>(sq.raw) <<
+        (color.to_index() * 16);
     }
 
-    constexpr auto set_hside(Color color, Square sq) -> void {
-      raw &= ~(static_cast<u32>(0xFF00) << (color.to_index() * 16));
-      raw |= static_cast<u32>(sq.raw) << (color.to_index() * 16 + 8);
+    constexpr auto set_hside(
+        Color color,
+        Square sq) -> void {
+
+      raw &= ~(
+        static_cast<u32>(0xFF00) <<
+        (color.to_index() * 16)
+      );
+
+      raw |=
+        static_cast<u32>(sq.raw) <<
+        (color.to_index() * 16 + 8);
     }
 
     constexpr auto clear(Color color) -> void {
-      raw |= static_cast<u32>(0x8080) << (color.to_index() * 16);
+      raw |=
+        static_cast<u32>(0x8080) <<
+        (color.to_index() * 16);
     }
 
+
+    /*
+     * Convert the four rook-square bytes in raw into
+     * the low four bytes of a u8x16 vector.
+     *
+     * The old ARM/scalar implementation used memcpy()
+     * inside this constexpr function. Android Clang rejects
+     * that because memcpy() is not constexpr.
+     *
+     * std::bit_cast is constexpr-safe and preserves the
+     * exact object representation of raw.
+     */
     constexpr auto to_vector() const -> u8x16 {
+
 #if LPS_SSE4_2 || LPS_AVX2 || LPS_AVX512
-      return u8x16 {_mm_cvtsi32_si128(std::bit_cast<int>(raw))};
+
+      return u8x16 {
+        _mm_cvtsi32_si128(
+          std::bit_cast<int>(raw)
+        )
+      };
+
 #else
+
+      constexpr usize bytes = sizeof(u32);
+
+      const auto source =
+        std::bit_cast<std::array<u8, bytes>>(raw);
+
       u8x16 result {};
-      std::memcpy(&result, &raw, sizeof(u32));
+
+      for (usize i = 0; i < bytes; ++i) {
+        result.raw[i] = source[i];
+      }
+
       return result;
+
 #endif
     }
 
-    constexpr auto unset(Color color, Square sq) -> void {
+
+    constexpr auto unset(
+        Color color,
+        Square sq) -> void {
+
       const u8x16 x = to_vector();
-      const m8x16 mask = x.eq(u8x16::splat(sq.raw));
-      const u8x16 y = mask.select(x, u8x16::splat(0x80));
+
+      const m8x16 mask =
+        x.eq(u8x16::splat(sq.raw));
+
+      const u8x16 y =
+        mask.select(
+          x,
+          u8x16::splat(0x80)
+        );
+
 #if LPS_SSE4_2 || LPS_AVX2 || LPS_AVX512
-      raw = std::bit_cast<u32>(_mm_cvtsi128_si32(y.raw));
+
+      raw = std::bit_cast<u32>(
+        _mm_cvtsi128_si32(y.raw)
+      );
+
 #else
+
       raw = y.extract_aligned<u32, 0>();
+
 #endif
     }
+
 
     constexpr auto has(Square sq) const -> bool {
-      return to_vector().eq(u8x16::splat(sq.raw)).to_bits() & 0b1111;
+      return
+        to_vector()
+          .eq(u8x16::splat(sq.raw))
+          .to_bits() &
+        0b1111;
     }
+
 
     constexpr auto is_clear() const -> bool {
       return to_index() == 0;
     }
 
+
     constexpr auto to_index() const -> usize {
+
 #if LPS_AVX2 || LPS_AVX512
-      return _pext_u32(~raw, 0x80808080);
+
+      return _pext_u32(
+        ~raw,
+        0x80808080
+      );
+
 #else
-      return ((~raw & 0x80808080) * 0x00204081) >> 28;
+
+      return (
+        (~raw & 0x80808080) *
+        0x00204081
+      ) >> 28;
+
 #endif
     }
 
-    constexpr auto operator==(const RookInfo&) const -> bool = default;
+
+    constexpr auto operator==(
+        const RookInfo&) const -> bool = default;
   };
+
 
   struct Position {
   private:
@@ -135,160 +241,333 @@ namespace rose {
     Square m_enpassant = Square::invalid();
     Color m_stm {};
 
-    mutable std::array<PieceMask, 64> m_cached_masked_attack_table {};
+    mutable std::array<PieceMask, 64>
+      m_cached_masked_attack_table {};
+
     mutable Bitboard m_cached_pinned {};
     mutable bool m_valid_pin_info = false;
 
-    auto add_attacks(Color color, Square sq, PieceId id, PieceType ptype) -> void;
-    auto remove_attacks(Color color, PieceId id) -> void;
-    auto toggle_sliders_single(Square sq) -> void;
+    auto add_attacks(
+        Color color,
+        Square sq,
+        PieceId id,
+        PieceType ptype) -> void;
+
+    auto remove_attacks(
+        Color color,
+        PieceId id) -> void;
+
+    auto toggle_sliders_single(
+        Square sq) -> void;
 
     template<bool update_sliders>
-    auto add_piece(Color color, Square sq, PieceId id, PieceType ptype) -> void;
+    auto add_piece(
+        Color color,
+        Square sq,
+        PieceId id,
+        PieceType ptype) -> void;
+
     template<bool update_sliders>
-    auto remove_piece(Color color, Square sq, PieceId id) -> void;
+    auto remove_piece(
+        Color color,
+        Square sq,
+        PieceId id) -> void;
+
     template<bool is_capture>
-    auto move_piece(Color color, Square src, Square dst, PieceId id, PieceType src_ptype, PieceType dst_ptype) -> void;
+    auto move_piece(
+        Color color,
+        Square src,
+        Square dst,
+        PieceId id,
+        PieceType src_ptype,
+        PieceType dst_ptype) -> void;
 
   public:
     static auto startpos() -> Position;
-    static auto frcstartpos(usize index) -> Position;
-    static auto dfrcstartpos(usize index) -> Position;
+
+    static auto frcstartpos(
+        usize index) -> Position;
+
+    static auto dfrcstartpos(
+        usize index) -> Position;
+
 
     constexpr Position() = default;
 
-    constexpr auto board() const -> const Byteboard& {
+
+    constexpr auto board() const
+        -> const Byteboard& {
       return m_board;
     }
 
-    constexpr auto attack_table(Color color) const -> const Wordboard& {
+
+    constexpr auto attack_table(Color color) const
+        -> const Wordboard& {
       return m_attack_table[color.to_index()];
     }
 
-    constexpr auto piece_list_sq(Color color) const -> PieceList<Square> {
+
+    constexpr auto piece_list_sq(Color color) const
+        -> PieceList<Square> {
       return m_piece_list_sq[color.to_index()];
     }
 
-    constexpr auto piece_list_type(Color color) const -> PieceList<PieceType> {
+
+    constexpr auto piece_list_type(Color color) const
+        -> PieceList<PieceType> {
       return m_piece_list_ptype[color.to_index()];
     }
 
-    constexpr auto rook_info() const -> RookInfo {
+
+    constexpr auto rook_info() const
+        -> RookInfo {
       return m_rook_info;
     }
 
-    constexpr auto fifty_move_clock() const -> u16 {
+
+    constexpr auto fifty_move_clock() const
+        -> u16 {
       return m_50mr;
     }
 
-    constexpr auto ply_since_null() const -> u16 {
+
+    constexpr auto ply_since_null() const
+        -> u16 {
       return m_since_null;
     }
 
-    constexpr auto full_move_counter() const -> u16 {
+
+    constexpr auto full_move_counter() const
+        -> u16 {
       return m_ply / 2 + 1;
     }
 
-    constexpr auto enpassant() const -> Square {
+
+    constexpr auto enpassant() const
+        -> Square {
       return m_enpassant;
     }
 
-    constexpr auto stm() const -> Color {
+
+    constexpr auto stm() const
+        -> Color {
       return m_stm;
     }
 
-    auto king_sq(Color color) const -> Square {
-      return m_piece_list_sq[color.to_index()][PieceId::king()];
+
+    auto king_sq(Color color) const
+        -> Square {
+      return m_piece_list_sq[
+        color.to_index()
+      ][PieceId::king()];
     }
 
-    auto place_at(Square sq) const -> Place {
+
+    auto place_at(Square sq) const
+        -> Place {
+
       rose_assert(sq.is_valid());
+
       return m_board.mailbox[sq.raw];
     }
 
-    auto ptype_at(Square sq) const -> PieceType {
+
+    auto ptype_at(Square sq) const
+        -> PieceType {
       return place_at(sq).ptype();
     }
 
-    auto what_is(Color color, PieceId id) const -> PieceType {
-      return m_piece_list_ptype[color.to_index()][id];
+
+    auto what_is(
+        Color color,
+        PieceId id) const
+        -> PieceType {
+
+      return m_piece_list_ptype[
+        color.to_index()
+      ][id];
     }
 
-    auto where_is(Color color, PieceId id) const -> Square {
-      return m_piece_list_sq[color.to_index()][id];
+
+    auto where_is(
+        Color color,
+        PieceId id) const
+        -> Square {
+
+      return m_piece_list_sq[
+        color.to_index()
+      ][id];
     }
+
 
     template<PieceType... ptypes>
-    auto piece_mask_for(Color color) const -> PieceMask {
-      return piece_list_type(color).piece_mask_for<ptypes...>();
+    auto piece_mask_for(Color color) const
+        -> PieceMask {
+
+      return piece_list_type(color)
+        .piece_mask_for<ptypes...>();
     }
+
 
     template<PieceType ptype>
-    auto bitboard_for(Color color) const -> Bitboard {
-      return board().bitboard_for<ptype>(color);
+    auto bitboard_for(Color color) const
+        -> Bitboard {
+
+      return board()
+        .bitboard_for<ptype>(color);
     }
+
 
     auto is_valid() const -> bool {
-      return attack_table(m_stm).read(king_sq(!m_stm)).is_empty();
+      return
+        attack_table(m_stm)
+          .read(king_sq(!m_stm))
+          .is_empty();
     }
 
+
     auto checkers() const -> PieceMask {
-      return attack_table(!m_stm).read(king_sq(m_stm));
+      return
+        attack_table(!m_stm)
+          .read(king_sq(m_stm));
     }
+
 
     auto is_in_check() const -> bool {
       return !checkers().is_empty();
     }
 
-    auto is_castle_aside_legal() const -> bool;
-    auto is_castle_hside_legal() const -> bool;
-    auto is_legal(Move m) const -> bool;
 
-    auto has_no_legal_moves_slow() const -> bool;
+    auto is_castle_aside_legal() const
+        -> bool;
+
+    auto is_castle_hside_legal() const
+        -> bool;
+
+    auto is_legal(Move m) const
+        -> bool;
+
+    auto has_no_legal_moves_slow() const
+        -> bool;
+
 
     template<eval::concepts::Observer Observer>
-    auto move(Move m, Observer observer) const -> Position;
-    auto null_move() const -> Position;
+    auto move(
+        Move m,
+        Observer observer) const
+        -> Position;
+
+
+    auto null_move() const
+        -> Position;
+
 
     auto move(Move m) const -> Position {
-      return move(m, eval::NullObserver {});
+      return move(
+        m,
+        eval::NullObserver {}
+      );
     }
 
-    auto hashes_after(Hashes prev, Move m) const -> Hashes;
-    auto hashes_after_null_move(Hashes prev) const -> Hashes;
-    auto calc_hashes_slow() const -> Hashes;
 
-    auto pin_info() const -> std::tuple<const std::array<PieceMask, 64>&, Bitboard>;
-    auto calc_pin_info_slow() const -> std::tuple<std::array<PieceMask, 64>, Bitboard>;
+    auto hashes_after(
+        Hashes prev,
+        Move m) const
+        -> Hashes;
 
-    auto calc_attacks_slow() const -> std::array<Wordboard, 2>;
-    auto calc_attacks_slow(Square sq) const -> std::array<PieceMask, 2>;
 
-    static auto parse(std::string_view str) -> std::expected<Position, ParseError> {
+    auto hashes_after_null_move(
+        Hashes prev) const
+        -> Hashes;
+
+
+    auto calc_hashes_slow() const
+        -> Hashes;
+
+
+    auto pin_info() const
+        -> std::tuple<
+          const std::array<PieceMask, 64>&,
+          Bitboard>;
+
+
+    auto calc_pin_info_slow() const
+        -> std::tuple<
+          std::array<PieceMask, 64>,
+          Bitboard>;
+
+
+    auto calc_attacks_slow() const
+        -> std::array<Wordboard, 2>;
+
+
+    auto calc_attacks_slow(Square sq) const
+        -> std::array<PieceMask, 2>;
+
+
+    static auto parse(std::string_view str)
+        -> std::expected<
+          Position,
+          ParseError> {
+
       Tokenizer it {str};
-      const std::string_view board = it.next();
-      const std::string_view color = it.next();
-      const std::string_view castling = it.next();
-      const std::string_view enpassant = it.next();
-      const std::string_view clock_50mr = it.next();
-      const std::string_view ply = it.next();
+
+      const std::string_view board =
+        it.next();
+
+      const std::string_view color =
+        it.next();
+
+      const std::string_view castling =
+        it.next();
+
+      const std::string_view enpassant =
+        it.next();
+
+      const std::string_view clock_50mr =
+        it.next();
+
+      const std::string_view ply =
+        it.next();
+
       if (!it.rest().empty())
-        return std::unexpected(ParseError::invalid_length);
-      return parse(board, color, castling, enpassant, clock_50mr, ply);
+        return std::unexpected(
+          ParseError::invalid_length
+        );
+
+      return parse(
+        board,
+        color,
+        castling,
+        enpassant,
+        clock_50mr,
+        ply
+      );
     }
 
-    static auto parse(std::string_view board,
-                      std::string_view color,
-                      std::string_view castle,
-                      std::string_view enpassant,
-                      std::string_view clock_50mr,
-                      std::string_view ply) -> std::expected<Position, ParseError>;
+
+    static auto parse(
+        std::string_view board,
+        std::string_view color,
+        std::string_view castle,
+        std::string_view enpassant,
+        std::string_view clock_50mr,
+        std::string_view ply)
+        -> std::expected<
+          Position,
+          ParseError>;
+
 
     auto dump() const -> void;
 
-    auto to_string(MoveFormat format) const -> std::string;
+    auto to_string(
+        MoveFormat format) const
+        -> std::string;
 
-    constexpr auto operator==(const Position&) const -> bool = default;
+
+    constexpr auto operator==(
+        const Position&) const
+        -> bool = default;
   };
 
 }  // namespace rose

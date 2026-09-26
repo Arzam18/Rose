@@ -135,7 +135,7 @@ namespace rose {
     int m_id;
     SearchShared& m_shared;
 
-    std::jthread m_thread;
+    std::thread m_thread;
 
     Position m_root;
     std::vector<Move> m_move_stack;
@@ -162,7 +162,10 @@ namespace rose {
         m_evaluation(network) {
     }
 
-    ~Search() final = default;
+    ~Search() final {
+      if (m_thread.joinable())
+        m_thread.join();
+    }
 
     auto reset() -> void final;
     auto launch() -> void final;

@@ -2,7 +2,8 @@
 
 #include "rose/common.hpp"
 
-#include <charconv>
+#include <cerrno>
+#include <cstdlib>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -78,10 +79,25 @@ namespace rose {
   }
 
   auto parse_f64(std::string_view str) -> std::optional<f64> {
-    f64 result;
-    const auto [ptr, ec] = std::from_chars(str.data(), str.data() + str.size(), result);
-    if (ec != std::errc {} || ptr != str.data() + str.size())
+    if (str.empty())
       return std::nullopt;
+
+    // Android's libc++ currently does not provide the floating-point
+    // std::from_chars overload used by the original implementation.
+    // Use strtod() instead while preserving full-string validation.
+    std::string text {str};
+
+    errno = 0;
+
+    char* end = nullptr;
+    const f64 result = std::strtod(text.c_str(), &end);
+
+    if (end != text.c_str() + text.size())
+      return std::nullopt;
+
+    if (errno == ERANGE)
+      return std::nullopt;
+
     return result;
   }
 

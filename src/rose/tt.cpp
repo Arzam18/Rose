@@ -22,7 +22,12 @@ namespace rose::tt {
 #else
 
   auto TT::table_alloc(std::size_t m_count) -> Bucket* {
-    return static_cast<Bucket*>(std::aligned_alloc(4096, m_count * sizeof(Bucket)));
+    void* ptr = nullptr;
+
+    if (posix_memalign(&ptr, 4096, m_count * sizeof(Bucket)) != 0)
+      return nullptr;
+
+    return static_cast<Bucket*>(ptr);
   }
 
   auto TT::table_free(Bucket* ptr) -> void {

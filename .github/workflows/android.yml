@@ -1,0 +1,298 @@
+name: Android ARM64 NEON
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-android:
+    runs-on: ubuntu-24.04
+
+    steps:
+      # ------------------------------------------------------------
+      # 1. Checkout
+      # ------------------------------------------------------------
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ------------------------------------------------------------
+      # 2. Install basic host tools
+      # ------------------------------------------------------------
+      - name: Install host tools
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          sudo apt-get update
+          sudo apt-get install -y \
+            clang \
+            make \
+            curl \
+            unzip \
+            file \
+            binutils
+
+      # ------------------------------------------------------------
+      # 3. Locate the Android SDK already installed on the runner
+      #
+      # We intentionally DO NOT use android-actions/setup-android.
+      # That action is what caused:
+      #
+      #   Warning: Failed to find package 'tools'
+      #
+      # ------------------------------------------------------------
+      - name: Configure Android SDK
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          if [ -n "${ANDROID_SDK_ROOT:-}" ]; then
+            SDK_ROOT="$ANDROID_SDK_ROOT"
+          elif [ -n "${ANDROID_HOME:-}" ]; then
+            SDK_ROOT="$ANDROID_HOME"
+          else
+            SDK_ROOT="/usr/local/lib/android/sdk"
+          fi
+
+          echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
+
+          echo "$SDK_ROOT/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
+          echo "$SDK_ROOT/platform-tools" >> "$GITHUB_PATH"
+
+          echo "Android SDK:"
+          echo "$SDK_ROOT"
+
+          test -d "$SDK_ROOT"
+
+      # ------------------------------------------------------------
+      # 4. Find sdkmanager
+      # ------------------------------------------------------------
+      - name: Locate sdkmanager
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          SDK_ROOT="$ANDROID_SDK_ROOT"
+
+          SDKMANAGER=""
+
+          if [ -x "$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" ]; then
+            SDKMANAGER="$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+          elif [ -x "$SDK_ROOT/cmdline-tools/16.0/bin/sdkmanager" ]; then
+            SDKMANAGER="$SDK_ROOT/cmdline-tools/16.0/bin/sdkmanager"
+          else
+            SDKMANAGER="$(find "$SDK_ROOT/cmdline-tools" \
+              -type f \
+              -name sdkmanager \
+              -perm -111 \
+              | head -n 1 || true)"
+          fi
+
+          if [ -z "$SDKMANAGER" ]; then
+            echo "ERROR: sdkmanager was not found."
+            find "$SDK_ROOT/cmdline-tools" -maxdepth 4 -type f 2>/dev/null || true
+            exit 1
+          fi
+
+          echo "SDKMANAGER=$SDKMANAGER" >> "$GITHUB_ENV"
+
+          echo "Using:"
+          "$SDKMANAGER" --version
+
+      # ------------------------------------------------------------
+      # 5. Accept Android licenses
+      # ------------------------------------------------------------
+      - name: Accept Android licenses
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          yes | "$SDKMANAGER" \
+            --sdk_root="$ANDROID_SDK_ROOT" \
+            --licenses || true
+
+      # ------------------------------------------------------------
+      # 6. Install ONLY the packages actually required
+      #
+      # IMPORTANT:
+      # Do NOT install the old "tools" package.
+      # ------------------------------------------------------------
+      - name: Install Android NDK
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          "$SDKMANAGER" \
+            --sdk_root="$ANDROID_SDK_ROOT" \
+            "platform-tools" \
+            "platforms;android-24" \
+            "ndk;27.2.12479018"
+
+      # ------------------------------------------------------------
+      # 7. Verify NDK
+      # ------------------------------------------------------------
+      - name: Verify Android NDK
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          export ANDROID_NDK_ROOT="$ANDROID_SDK_ROOT/ndk/27.2.12479018"
+
+          test -d "$ANDROID_NDK_ROOT"
+
+          TOOLCHAIN="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin"
+
+          test -x "$TOOLCHAIN/aarch64-linux-android24-clang"
+          test -x "$TOOLCHAIN/aarch64-linux-android24-clang++"
+
+          echo "NDK:"
+          "$ANDROID_NDK_ROOT/ndk-build" --version || true
+
+          echo "Clang:"
+          "$TOOLCHAIN/aarch64-linux-android24-clang++" --version
+
+      # ------------------------------------------------------------
+      # 8. Build Rose
+      #
+      # ARM64 / ARMv8.2-A / NEON / dotprod
+      #
+      # Rose's new NEON backend is selected automatically by
+      # AArch64 compilation.
+      # ------------------------------------------------------------
+      - name: Build Rose for Android ARM64 NEON
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          export ANDROID_NDK_ROOT="$ANDROID_SDK_ROOT/ndk/27.2.12479018"
+
+          TOOLCHAIN="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin"
+
+          export CC="$TOOLCHAIN/aarch64-linux-android24-clang"
+          export CXX="$TOOLCHAIN/aarch64-linux-android24-clang++"
+
+          echo "CC=$CC"
+          echo "CXX=$CXX"
+
+          "$CC" --version
+          "$CXX" --version
+
+          # Clean previous objects.
+          make clean || true
+
+          VERSION="$(tr -d '[:space:]' < src/rose_version.txt)"
+          BIN="rose-${VERSION}-android-arm64-neon"
+
+          echo "Building:"
+          echo "$BIN"
+
+          make \
+            "$BIN" \
+            ARCH=arm64-neon \
+            EXE="$BIN" \
+            CXX="$CXX" \
+            LDFLAGS="-pthread -static-libstdc++ -Wl,--gc-sections"
+
+          test -f "$BIN"
+
+          chmod +x "$BIN"
+
+      # ------------------------------------------------------------
+      # 9. Inspect binary
+      # ------------------------------------------------------------
+      - name: Verify ARM64 binary
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          VERSION="$(tr -d '[:space:]' < src/rose_version.txt)"
+          BIN="rose-${VERSION}-android-arm64-neon"
+
+          echo "========================================"
+          echo "FILE"
+          echo "========================================"
+
+          file "$BIN"
+
+          echo
+          echo "========================================"
+          echo "ELF HEADER"
+          echo "========================================"
+
+          readelf -h "$BIN" | grep -E \
+            'Class:|Data:|Type:|Machine:|Entry point'
+
+          echo
+          echo "========================================"
+          echo "ARCHITECTURE"
+          echo "========================================"
+
+          file "$BIN" | grep -E \
+            'ARM aarch64|ARM64|AArch64'
+
+      # ------------------------------------------------------------
+      # 10. Verify dynamic dependencies
+      #
+      # The executable should not require a separate libc++_shared.so.
+      # ------------------------------------------------------------
+      - name: Check runtime dependencies
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          VERSION="$(tr -d '[:space:]' < src/rose_version.txt)"
+          BIN="rose-${VERSION}-android-arm64-neon"
+
+          echo "========================================"
+          echo "NEEDED LIBRARIES"
+          echo "========================================"
+
+          readelf -d "$BIN" | grep NEEDED || true
+
+          echo
+          echo "========================================"
+          echo "LIBC++ CHECK"
+          echo "========================================"
+
+          if readelf -d "$BIN" | grep -q 'libc++_shared.so'; then
+            echo "ERROR: binary still requires libc++_shared.so"
+            exit 1
+          fi
+
+          echo "OK: no libc++_shared.so dependency."
+
+      # ------------------------------------------------------------
+      # 11. Prepare artifact
+      #
+      # ONLY ONE FILE is placed in the artifact.
+      # ------------------------------------------------------------
+      - name: Prepare single binary artifact
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          VERSION="$(tr -d '[:space:]' < src/rose_version.txt)"
+          BIN="rose-${VERSION}-android-arm64-neon"
+
+          rm -rf artifact
+          mkdir -p artifact
+
+          cp "$BIN" "artifact/$BIN"
+          chmod +x "artifact/$BIN"
+
+          echo "Artifact:"
+          ls -lh artifact
+
+      # ------------------------------------------------------------
+      # 12. Upload one binary
+      # ------------------------------------------------------------
+      - name: Upload Android ARM64 NEON binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: rose-android-arm64-neon
+          path: artifact/*
+          if-no-files-found: error

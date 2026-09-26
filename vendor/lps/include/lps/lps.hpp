@@ -2,7 +2,16 @@
 
 #include "lps/stdint.hpp"
 
-#if defined(__AVX512F__) && __AVX512F__ && defined(__AVX512VBMI2__) && __AVX512VBMI2__
+#if defined(__aarch64__) && defined(__ARM_NEON)
+#define LPS_NEON 1
+
+#include "lps/neon/neon.hpp"
+
+namespace lps {
+  using environment = neon::environment;
+}  // namespace lps
+
+#elif defined(__AVX512F__) && __AVX512F__ && defined(__AVX512VBMI2__) && __AVX512VBMI2__
 
 #define LPS_AVX512 1
 

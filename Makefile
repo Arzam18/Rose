@@ -17,7 +17,11 @@ CXX := clang++
 CPPFLAGS := -Isrc -MMD -MP
 CPPFLAGS += -DFMT_HEADER_ONLY -Ivendor/fmt/include
 CPPFLAGS += -Ivendor/lps/include
-CXXFLAGS := -std=c++26 -march=$(ARCH)
+ifeq ($(ARCH),arm64-neon)
+  CXXFLAGS := -std=c++26 -march=armv8.2-a+simd+dotprod -mtune=cortex-a76
+else
+  CXXFLAGS := -std=c++26 -march=$(ARCH)
+endif
 RELFLAGS := -DNDEBUG -O3 -DROSE_NO_ASSERTS -flto=thin
 DEBFLAGS := -DNDEBUG -O2 -g
 

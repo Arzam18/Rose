@@ -121,7 +121,12 @@ namespace rose::tool::datagen {
 #endif
 
     std::mt19937_64 per_thread_seed_gen {dgc.root_seed};
+#if defined(__ANDROID__)
+    // Workers are explicitly joined below; std::thread is sufficient on NDK r27c.
+    std::vector<std::thread> threads;
+#else
     std::vector<std::jthread> threads;
+#endif
     for (int i = 0; i < thread_count; i++) {
       const u64 thread_seed = per_thread_seed_gen();
       threads.emplace_back(&thread_main, i, std::ref(state), dgc, thread_seed);

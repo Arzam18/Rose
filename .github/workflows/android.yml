@@ -1,0 +1,346 @@
+name: Rose Android ARM64 NEON
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+    paths:
+      - '.github/workflows/android.yml'
+      - 'Makefile'
+      - 'src/**'
+      - 'vendor/lps2/**'
+      - 'vendor/fmt/**'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - '.github/workflows/android.yml'
+      - 'Makefile'
+      - 'src/**'
+      - 'vendor/lps2/**'
+      - 'vendor/fmt/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rose-android-arm64-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-android:
+    name: Build Android ARM64 NEON
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout Rose
+        uses: actions/checkout@v4
+
+      - name: Install Android NDK r27c
+        uses: nttld/setup-ndk@v1
+        id: ndk
+        with:
+          ndk-version: r27c
+          add-to-path: false
+
+      - name: Verify source and Android toolchain
+        shell: bash
+        env:
+          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+        run: |
+          set -euo pipefail
+
+          test -s Makefile
+          test -s src/rose/eval/nnue/embedded.cpp
+          test -s src/rose/eval/nnue/embedded.hpp
+          test -s src/rose/eval/nnue/kyanite.hpp
+          test -s vendor/lps2/include/lps2/lps2.hpp
+          test -s src/rose_network.txt
+
+          NETWORK="$(tr -d '[:space:]' < src/rose_network.txt)"
+          if [[ ! "$NETWORK" =~ ^[A-Za-z0-9._-]+$ ]]; then
+            echo "ERROR: Invalid network name in src/rose_network.txt: $NETWORK"
+            exit 1
+          fi
+
+          test -n "$ANDROID_NDK_HOME"
+          test -d "$ANDROID_NDK_HOME"
+
+          NDK_BIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          ANDROID_CXX="$NDK_BIN/aarch64-linux-android24-clang++"
+          ANDROID_READELF="$NDK_BIN/llvm-readelf"
+          ANDROID_OBJDUMP="$NDK_BIN/llvm-objdump"
+
+          test -x "$ANDROID_CXX"
+          test -x "$ANDROID_READELF"
+          test -x "$ANDROID_OBJDUMP"
+          test -s "$ANDROID_NDK_HOME/source.properties"
+
+          NDK_REVISION="$(sed -n 's/^Pkg.Revision = //p' "$ANDROID_NDK_HOME/source.properties" | tr -d '\r')"
+          if [[ "$NDK_REVISION" != "27.2.12479018" ]]; then
+            echo "ERROR: Expected NDK r27c (27.2.12479018), got $NDK_REVISION"
+            cat "$ANDROID_NDK_HOME/source.properties"
+            exit 1
+          fi
+
+          "$ANDROID_CXX" --version
+
+          # Confirm the compiler triple really targets Android API 24.
+          printf '%s\n' \
+            '#if !defined(__ANDROID_API__)' \
+            '#error __ANDROID_API__ is not defined' \
+            '#endif' \
+            '#if __ANDROID_API__ != 24' \
+            '#error Android API level is not 24' \
+            '#endif' | "$ANDROID_CXX" -E -x c++ - >/dev/null
+
+          # Fail early if the Android compiler does not expose the exact
+          # AArch64 + Advanced SIMD target expected by the NEON lps2 backend.
+          cat > "$RUNNER_TEMP/rose-neon-check.cpp" <<'CPP'
+          #include "lps2/arch.hpp"
+          #if !defined(__aarch64__)
+          #error Rose Android build must target AArch64
+          #endif
+          #if !defined(__ARM_NEON) && !defined(__ARM_NEON__)
+          #error ARM Advanced SIMD (NEON) compiler support is not enabled
+          #endif
+          #if !defined(LPS2_ARCH_AARCH64) || !defined(LPS2_ARCH_NEON)
+          #error lps2 did not detect its AArch64 NEON backend
+          #endif
+          int main() { return 0; }
+          CPP
+          "$ANDROID_CXX" \
+            -std=c++26 \
+            -march=armv8-a+simd \
+            -Ivendor/lps2/include \
+            -fsyntax-only "$RUNNER_TEMP/rose-neon-check.cpp"
+
+          echo "ANDROID_NDK_HOME=$ANDROID_NDK_HOME" >> "$GITHUB_ENV"
+          echo "ANDROID_CXX=$ANDROID_CXX" >> "$GITHUB_ENV"
+          echo "ANDROID_READELF=$ANDROID_READELF" >> "$GITHUB_ENV"
+          echo "ANDROID_OBJDUMP=$ANDROID_OBJDUMP" >> "$GITHUB_ENV"
+          echo "ROSE_NETWORK=$NETWORK" >> "$GITHUB_ENV"
+
+          {
+            echo "### Rose Android build configuration"
+            echo "- Source version: $(tr -d '[:space:]' < src/rose_version.txt)"
+            echo "- Network: $NETWORK"
+            echo "- ABI: arm64-v8a"
+            echo "- Android API: 24"
+            echo "- NDK: r27c (27.2.12479018)"
+            echo "- ISA: ARMv8-A Advanced SIMD (NEON), baseline AArch64"
+            echo "- CPU tuning: Cortex-A76"
+            echo "- ELF load alignment: 16 KiB"
+            echo "- Dotprod: not enabled; current NNUE uses 16-bit operands"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Download Rose neural network
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          NETWORK_FILE="networks/${ROSE_NETWORK}.rosenet"
+          URL="https://github.com/87flowers/rose-nets/releases/download/${ROSE_NETWORK}/${ROSE_NETWORK}.rosenet"
+
+          mkdir -p networks
+          rm -f "$NETWORK_FILE"
+
+          echo "Downloading Rose network: $ROSE_NETWORK"
+          curl \
+            --fail \
+            --location \
+            --show-error \
+            --retry 8 \
+            --retry-delay 5 \
+            --retry-all-errors \
+            --connect-timeout 30 \
+            --max-time 600 \
+            --user-agent "GitHub-Actions-Rose-Android-Build" \
+            "$URL" \
+            --output "$NETWORK_FILE"
+
+          test -s "$NETWORK_FILE"
+          echo "Downloaded network:"
+          ls -lh "$NETWORK_FILE"
+          wc -c "$NETWORK_FILE"
+
+      - name: Generate Android embedded network source
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 <<'PY'
+          from pathlib import Path
+
+          network_name = Path("src/rose_network.txt").read_text().strip()
+          network_file = Path("networks") / f"{network_name}.rosenet"
+          embedded_cpp = Path("src/rose/eval/nnue/embedded.cpp")
+          embedded_hpp = Path("src/rose/eval/nnue/embedded.hpp")
+
+          if not network_file.is_file() or network_file.stat().st_size == 0:
+              raise SystemExit(f"ERROR: network file is missing or empty: {network_file}")
+
+          data = network_file.read_bytes()
+          print(f"Embedding {len(data):,} network bytes from {network_file}")
+
+          hpp = embedded_hpp.read_text()
+          old_decl = (
+              "alignas(EmbeddedNetwork) extern const char "
+              "g_embedded_network_raw[];"
+          )
+          new_decl = (
+              "alignas(EmbeddedNetwork) extern const unsigned char "
+              "g_embedded_network_raw[];"
+          )
+
+          if old_decl in hpp:
+              hpp = hpp.replace(old_decl, new_decl)
+              embedded_hpp.write_text(hpp)
+          elif new_decl not in hpp:
+              raise SystemExit(
+                  "ERROR: Could not find the expected "
+                  "g_embedded_network_raw declaration in embedded.hpp"
+              )
+
+          # NDK r27c Clang does not provide the #embed implementation used by
+          # upstream's embedded.cpp. Emit a normal C++ byte array instead.
+          # unsigned char is required so bytes >= 0x80 are not narrowed to char.
+          with embedded_cpp.open("w", newline="\n") as f:
+              f.write('#include "rose/eval/nnue/embedded.hpp"\n\n')
+              f.write("namespace rose::eval::nnue {\n\n")
+              f.write(
+                  "  alignas(EmbeddedNetwork) "
+                  "const unsigned char g_embedded_network_raw[] = {\n"
+              )
+
+              for offset in range(0, len(data), 16):
+                  chunk = data[offset:offset + 16]
+                  values = ", ".join(f"0x{value:02X}" for value in chunk)
+                  f.write(f"    {values},\n")
+
+              f.write("  };\n\n")
+              f.write("}  // namespace rose::eval::nnue\n")
+
+          print(f"Generated {embedded_cpp} ({embedded_cpp.stat().st_size:,} source bytes)")
+          print(f"Updated {embedded_hpp} to use unsigned char storage")
+          PY
+
+          test -s src/rose/eval/nnue/embedded.cpp
+          grep -q 'const unsigned char g_embedded_network_raw' src/rose/eval/nnue/embedded.cpp
+
+      - name: Build Rose for Android ARM64 NEON
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          VERSION="$(tr -d '[:space:]' < src/rose_version.txt)"
+          BIN="rose-${VERSION}-android-arm64-neon"
+
+          echo "Building Rose $VERSION"
+          echo "Target: $BIN"
+          echo "Compiler: $ANDROID_CXX"
+          echo "Target ISA: armv8-a+simd (NEON baseline; no Dotprod assumption)"
+
+          rm -rf build "$BIN"
+
+          make "$BIN" \
+            ARCH=arm64-neon \
+            EXE="$BIN" \
+            CXX="$ANDROID_CXX" \
+            CXXFLAGS="-std=c++26 -O3 -march=armv8-a+simd -mtune=cortex-a76 -fPIE -ffunction-sections -fdata-sections" \
+            LDFLAGS="-pthread -pie -static-libstdc++ -Wl,--gc-sections -Wl,-z,max-page-size=16384"
+
+          test -s "$BIN"
+          chmod +x "$BIN"
+          ls -lh "$BIN"
+
+          echo "ROSE_BINARY=$BIN" >> "$GITHUB_ENV"
+
+      - name: Verify Android ARM64 binary
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "===== ELF information ====="
+          file "$ROSE_BINARY"
+          "$ANDROID_READELF" -h "$ROSE_BINARY" | grep -E 'Class:|Data:|Type:|Machine:|Entry point'
+
+          file "$ROSE_BINARY" | grep -E 'ARM aarch64|ARM64|AArch64'
+          "$ANDROID_READELF" -h "$ROSE_BINARY" | grep -q 'AArch64'
+
+          echo
+          echo "===== Dynamic dependencies ====="
+          "$ANDROID_READELF" -d "$ROSE_BINARY" | grep NEEDED || true
+
+          if "$ANDROID_READELF" -d "$ROSE_BINARY" | grep -q 'libc++_shared.so'; then
+            echo "ERROR: executable depends on libc++_shared.so"
+            exit 1
+          fi
+          echo "OK: no libc++_shared.so dependency"
+
+          echo
+          echo "===== ELF 16 KiB page alignment ====="
+          "$ANDROID_READELF" -lW "$ROSE_BINARY" | python3 -c '
+          import re, sys
+          text = sys.stdin.read()
+          aligns = [int(value, 16) for value in re.findall(r"^\s*LOAD\s+.*\s+(0x[0-9a-fA-F]+)\s*$", text, re.M)]
+          if not aligns:
+              raise SystemExit("ERROR: no PT_LOAD segments found")
+          print("PT_LOAD alignments:", ", ".join(hex(value) for value in aligns))
+          if any(value < 0x4000 for value in aligns):
+              raise SystemExit("ERROR: a PT_LOAD segment is not 16 KiB aligned")
+          print("OK: every PT_LOAD segment is aligned to at least 16 KiB")
+          '
+
+          echo
+          echo "===== NEON instruction validation ====="
+          NEON_DISASSEMBLY="$RUNNER_TEMP/rose-neon-disassembly.txt"
+          "$ANDROID_OBJDUMP" -d --no-show-raw-insn "$ROSE_BINARY" > "$NEON_DISASSEMBLY"
+          if ! grep -Eq '[[:space:]](add|and|orr|eor|mvn|ushr|shl|xtn|uaddlv|addv|cnt|cmeq|cmgt|bsl)[[:space:]]+v[0-9]+\.' "$NEON_DISASSEMBLY"; then
+            echo "ERROR: no expected AArch64 Advanced SIMD instructions found in the final binary"
+            exit 1
+          fi
+          echo "OK: AArch64 Advanced SIMD instructions found in the final binary"
+
+          echo
+          echo "===== Embedded network validation ====="
+          NETWORK_FILE="networks/${ROSE_NETWORK}.rosenet"
+          NETWORK_SIZE="$(wc -c < "$NETWORK_FILE")"
+          BINARY_SIZE="$(wc -c < "$ROSE_BINARY")"
+          echo "Network: $NETWORK_SIZE bytes"
+          echo "Binary:  $BINARY_SIZE bytes"
+
+          if (( BINARY_SIZE <= NETWORK_SIZE )); then
+            echo "ERROR: binary is not larger than the embedded network"
+            exit 1
+          fi
+          echo "OK: binary size is consistent with an embedded network"
+
+          {
+            echo "### Android binary validation"
+            echo "- Binary: $ROSE_BINARY"
+            echo "- Binary size: $BINARY_SIZE bytes"
+            echo "- Embedded network size: $NETWORK_SIZE bytes"
+            echo "- Architecture: AArch64 + verified NEON instructions"
+            echo "- ELF PT_LOAD alignment: at least 16 KiB"
+            echo "- Runtime: no libc++_shared.so dependency"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Prepare artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rm -rf artifact
+          mkdir -p artifact
+          cp "$ROSE_BINARY" "artifact/$ROSE_BINARY"
+          chmod +x "artifact/$ROSE_BINARY"
+          ls -lah artifact
+
+      - name: Upload Android ARM64 NEON binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: rose-android-arm64-neon
+          path: artifact/*
+          if-no-files-found: error
+          retention-days: 30

@@ -2,7 +2,12 @@
 
 #include "rose/common.hpp"
 
+#if defined(__ANDROID__)
+#include <cerrno>
+#include <cstdlib>
+#else
 #include <charconv>
+#endif
 #include <optional>
 #include <sstream>
 #include <string>
@@ -78,11 +83,27 @@ namespace rose {
   }
 
   auto parse_f64(std::string_view str) -> std::optional<f64> {
+#if defined(__ANDROID__)
+    if (str.empty())
+      return std::nullopt;
+
+    // NDK r27c libc++ lacks the floating-point std::from_chars overload.
+    // Require full input consumption and reject range errors like the
+    // upstream from_chars implementation.
+    const std::string text {str};
+    errno = 0;
+    char* end = nullptr;
+    const f64 result = std::strtod(text.c_str(), &end);
+    if (end != text.c_str() + text.size() || errno == ERANGE)
+      return std::nullopt;
+    return result;
+#else
     f64 result;
     const auto [ptr, ec] = std::from_chars(str.data(), str.data() + str.size(), result);
     if (ec != std::errc {} || ptr != str.data() + str.size())
       return std::nullopt;
     return result;
+#endif
   }
 
 }  // namespace rose

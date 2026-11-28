@@ -135,7 +135,12 @@ namespace rose {
     int m_id;
     SearchShared& m_shared;
 
+#if defined(__ANDROID__)
+    // Android NDK r27c libc++ does not provide std::jthread.
+    std::thread m_thread;
+#else
     std::jthread m_thread;
+#endif
 
     Position m_root;
     std::vector<Move> m_move_stack;
@@ -163,7 +168,14 @@ namespace rose {
         m_evaluation(network) {
     }
 
+#if defined(__ANDROID__)
+    ~Search() final {
+      if (m_thread.joinable())
+        m_thread.join();
+    }
+#else
     ~Search() final = default;
+#endif
 
     auto reset() -> void final;
     auto launch() -> void final;

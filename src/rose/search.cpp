@@ -75,9 +75,15 @@ namespace rose {
   template<eval::concepts::State Evaluation>
   auto Search<Evaluation>::launch() -> void {
     rose_assert(!m_thread.joinable());
+#if defined(__ANDROID__)
+    m_thread = std::thread([this] {
+      this->thread_main();
+    });
+#else
     m_thread = std::jthread([this] {
       this->thread_main();
     });
+#endif
   }
 
   auto calc_time(const SearchLimit& limits, Color stm) -> std::tuple<time::Duration, time::Duration> {

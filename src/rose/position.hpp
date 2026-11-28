@@ -92,9 +92,20 @@ namespace rose {
 #if LPS2_ARCH_SSE4_2
       return u8x16 {_mm_cvtsi32_si128(std::bit_cast<int>(raw))};
 #else
+#if defined(__ANDROID__)
+      // Android NDK r27c cannot constant-evaluate this memcpy path.
+      // Preserve the low four bytes and zero-fill the remaining vector lanes.
+      constexpr usize byte_count = sizeof(u32);
+      const auto source = std::bit_cast<std::array<u8, byte_count>>(raw);
+      std::array<u8, 16> bytes {};
+      for (usize i = 0; i < byte_count; ++i)
+        bytes[i] = source[i];
+      return u8x16 {bytes};
+#else
       u8x16 result {};
       std::memcpy(&result, &raw, sizeof(u32));
       return result;
+#endif
 #endif
     }
 
